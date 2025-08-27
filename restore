@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# restore: recover most-recent matching item from /tmp/trash using /tmp/trash/trash.log
+
+set -uo pipefail
+
+TRASH_DIR="/tmp/trash"
+LOG_FILE="${TRASH_DIR}/trash.log"
+RESTORE_LOG="${TRASH_DIR}/restore.log"
+
+usage() {
+  cat <<'EOF'
+Usage: restore <name-or-partial>
+
+Restores the most recent deletion whose original path or basename contains the query.
+The item is moved from /tmp/trash back to its original directory.
+If the destination exists, the restored item is renamed with a .restored-<UTC> suffix.
+EOF
+}
+
+if (($# != 1)); then usage; exit 2; fi
+query="$1"
+
+if [[ ! -f "$LOG_FILE" ]]; then
+  echo "restore: no log file at $LOG_FILE" >&2
+  exit 1
+fi
+
+# Find most recent matching entry (search from bottom)
+# Log format: ISO8601_UTC \t ORIGINAL_PATH \t TRASH_PATH
+match_line="$(tac "$LOG_FILE" | awk -v q="$query" -F '\t' '
+  function tolower_str(s) { for(i=1;i<=length(s);i++){} return tolower(s) }
+  {
+    ts=$1; orig=$2; trash=$3;
+    n=split(orig, a, "/"); base=a[n];
+    if (index(tolower(orig), tolower(q)) > 0 || index(tolower(base), tolower(q)) > 0) {
+      print $0; exit
+    }
+  }')"
+
+if [[ -z "${match_line}" ]]; then
+  echo "restore: no match found in log for: ${query}" >&2
+  exit 1
+fi
+
+ts="$(printf "%s" "$match_line" | awk -F '\t' '{print $1}')"
+orig="$(printf "%s" "$match_line" | awk -F '\t' '{print $2}')"
+trash="$(printf "%s" "$match_line" | awk -F '\t' '{print $3}')"
+
+if [[ ! -e "$trash" ]]; then
+  echo "restore: missing from trash: $trash" >&2
+  exit 1
+fi
+
+dest_dir="$(dirname -- "$orig")"
+mkdir -p -- "$dest_dir" || { echo "restore: cannot create destination dir: $dest_dir" >&2; exit 1; }
+
+dest="$orig"
+if [[ -e "$dest" ]]; then
+  suffix="$(date -u +%Y%m%d%H%M%SZ)"
+  dest="${orig}.restored-${suffix}"
+  echo "restore: warning: '$orig' already exists, restoring as '$dest'" >&2
+fi
+
+if mv -- "$trash" "$dest"; then
+  echo "Restored: $dest   (original deletion at $ts)"
+  printf '%s\t%s\t%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$dest" "$trash" >> "$RESTORE_LOG" 2>/dev/null || true
+  exit 0
+else
+  echo "restore: failed to move '$trash' -> '$dest'" >&2
+  exit 1
+fi
+

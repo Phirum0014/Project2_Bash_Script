@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Safe rm: move files/dirs to /tmp/trash instead of deleting.
+# Supports: -r for directories, multiple targets, logging to /tmp/trash/trash.log
+
+set -uo pipefail
+
+TRASH_DIR="/tmp/trash"
+LOG_FILE="${TRASH_DIR}/trash.log"
+
+usage() {
+  cat <<'EOF'
+Usage: rm [-r] [--] <file_or_dir>...
+
+Safe rm moves items to /tmp/trash instead of deleting.
+  -r        remove directories and their contents recursively
+  --        end of options (useful if a filename begins with -)
+
+Unsupported options are rejected.
+EOF
+}
+
+ensure_trash() {
+  mkdir -p -- "${TRASH_DIR}" || { echo "rm: cannot create ${TRASH_DIR}" >&2; exit 1; }
+  # Ensure log exists
+  touch -- "${LOG_FILE}" 2>/dev/null || { echo "rm: cannot write log at ${LOG_FILE}" >&2; exit 1; }
+}
+
+resolve_path() {
+  # Resolve absolute path for logging; fall back if realpath is unavailable.
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "$1"
+  else
+    (
+      cd -- "$(dirname -- "$1")" 2>/dev/null && \
+      printf "%s/%s\n" "$(pwd)" "$(basename -- "$1")"
+    ) || printf "%s\n" "$1"
+  fi
+}
+
+recursive=0
+declare -a targets=()
+
+# Parse args
+while (($#)); do
+  case "$1" in
+    -r|-R) recursive=1;;
+    --) shift; while (($#)); do targets+=("$1"); shift; done; break;;
+    -*) echo "rm: unsupported option: $1" >&2; usage; exit 2;;
+    *) targets+=("$1");;
+  esac
+  shift || true
+done
+
+if ((${#targets[@]} == 0)); then
+  usage; exit 2
+fi
+
+ensure_trash
+
+timestamp="$(date -u +%Y%m%d%H%M%SZ)"
+
+status=0
+for path in "${targets[@]}"; do
+  if [[ ! -e "$path" ]]; then
+    echo "rm: cannot remove '$path': No such file or directory" >&2
+    status=1
+    continue
+  fi
+
+  if [[ -d "$path" && $recursive -ne 1 ]]; then
+    echo "rm: cannot remove '$path': Is a directory (use -r)" >&2
+    status=1
+    continue
+  fi
+
+  base="$(basename -- "$path")"
+  name="$base"
+  ext=""
+  if [[ "$base" == *.* && "$base" != .* ]]; then
+    ext=".${base##*.}"
+    name="${base%.*}"
+  fi
+
+  rand="${RANDOM}"
+  trash_name="${name}__${timestamp}_${rand}${ext}"
+  dest="${TRASH_DIR}/${trash_name}"
+
+  orig_abs="$(resolve_path "$path")"
+  if mv -- "$path" "$dest"; then
+    printf '%s\t%s\t%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$orig_abs" "$dest" >> "$LOG_FILE"
+  else
+    echo "rm: failed to move '$path' to trash" >&2
+    status=1
+  fi
+done
+
+exit $status
+orig_abs="$(resolve_path "$path")"
+if mv -- "$path" "$dest"; then
+    printf '%s\t%s\t%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$orig_abs" "$dest" >> "$LOG_FILE"
+else
+    echo "rm: failed to move '$path' to trash" >&2
+    status=1
+fi
